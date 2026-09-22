@@ -1,0 +1,13 @@
+dash>=3.0,<5
+plotly>=6.0,<7
+xarray>=2024.9
+zarr>=2.18,<3
+numcodecs>=0.12,<0.16
+rasterio>=1.4,<2
+geopandas>=1.0,<2
+shapely>=2.0,<3
+pyproj>=3.6,<4
+pandas>=2.2,<3
+numpy>=1.26,<3
+scipy>=1.13,<2
+pytest>=8,<9
