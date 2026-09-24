@@ -16,6 +16,24 @@ de **coupes distance–altitude** lisibles en contexte opérationnel.
 | Sondage vertical | Profil T / point de rosée / vent à un point cliqué. |
 | Segments exposés | Tableau prêt pour la décision: tronçon, aléa, type, heure du pic. |
 
+## Site statique (GitHub Pages)
+
+Le dépôt publie la même vue sur GitHub Pages. Le serveur Dash ne peut pas
+tourner là: à chaque poussée sur `main`, le workflow
+`.github/workflows/pages.yml` calcule les corridors et dépose un site statique
+(`docs/`) à l'adresse <https://olivier0922.github.io/PFE-Prototype/>.
+
+Dans les réglages du dépôt, **Pages** doit utiliser la source **GitHub Actions**.
+
+Export local, par exemple pour vérifier le site avant de le pousser:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_pages.py
+python -m http.server 8080 --directory docs
+```
+
+Puis ouvrir <http://127.0.0.1:8080>.
+
 ## Démarrage sous Windows
 
 ```powershell
