@@ -181,3 +181,16 @@ def sample_line_geometry(
     sample_lon[0], sample_lat[0] = coordinates[0]
     sample_lon[-1], sample_lat[-1] = coordinates[-1]
     return targets_m / 1000.0, sample_lon, sample_lat
+
+
+def track_bearing_deg(longitude: np.ndarray, latitude: np.ndarray) -> np.ndarray:
+    """Local azimuth of a sampled track (degrees clockwise from north, towards the end)."""
+    lon = np.asarray(longitude, dtype=float)
+    lat = np.asarray(latitude, dtype=float)
+    count = len(lon)
+    if count < 2:
+        return np.zeros(count)
+    before = np.r_[0, np.arange(count - 1)]
+    after = np.r_[np.arange(1, count), count - 1]
+    azimuth, _, _ = GEOD.inv(lon[before], lat[before], lon[after], lat[after])
+    return np.mod(np.asarray(azimuth, dtype=float), 360.0)

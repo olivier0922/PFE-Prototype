@@ -44,6 +44,13 @@ def test_profiles_and_risk_for_default_corridor(repository: DataRepository) -> N
     assert np.isnan(profiles.temperature_c[:, 0, profiles.track.terrain_m > 200.0]).all()
     assert risk.score.shape == (time_count, point_count)
     assert np.isfinite(risk.score).all()
+    # Every registered variable available in the file is gridded like temperature.
+    assert set(profiles.fields) == set(profiles.variables)
+    assert "vorticity" in profiles.fields  # optional ERA5 variable present in the supplied file
+    for values in profiles.fields.values():
+        assert values.shape == profiles.temperature_c.shape
+    assert profiles.u_ms.shape == profiles.temperature_c.shape
+    assert profiles.track.bearing_deg.shape == (point_count,)
 
 
 def test_network_overview_ranks_every_corridor(repository: DataRepository) -> None:

@@ -28,7 +28,8 @@ from .config import (
     STANDARD_LAPSE_RATE_K_PER_M,
 )
 from .data import DataRepository
-from .network import Corridor, sample_line_geometry
+from .network import Corridor, sample_line_geometry, track_bearing_deg
+from .variables import Variable, available_variables, dewpoint_from_relative_humidity
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class TrackSamples:
     longitude: np.ndarray
     latitude: np.ndarray
     terrain_m: np.ndarray
+    bearing_deg: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -55,7 +57,9 @@ class ColumnDiagnostics:
 class LineProfiles:
     """Atmospheric columns along a corridor for every ERA5 time step.
 
-    Gridded arrays have shape ``(time, altitude, point)``.
+    Gridded arrays have shape ``(time, altitude, point)``. ``fields`` holds
+    every variable of :mod:`src.variables` available for this dataset, in
+    display units.
     """
 
     corridor: Corridor
@@ -64,30 +68,23 @@ class LineProfiles:
     altitude_m: np.ndarray
     level_hpa: np.ndarray
     level_height_m: np.ndarray  # (time, level, point)
-    temperature_c: np.ndarray
-    dewpoint_c: np.ndarray
-    relative_humidity: np.ndarray
-    wind_speed_ms: np.ndarray
+    variables: dict[str, Variable]
+    fields: dict[str, np.ndarray]
+    u_ms: np.ndarray
+    v_ms: np.ndarray
     pressure_hpa: np.ndarray
     diagnostics: ColumnDiagnostics
 
     def field(self, name: str) -> np.ndarray:
-        return {
-            "temperature": self.temperature_c,
-            "dewpoint": self.dewpoint_c,
-            "humidity": self.relative_humidity,
-            "wind": self.wind_speed_ms,
-            "pressure": self.pressure_hpa,
-        }[name]
+        return self.fields[name]
 
+    @property
+    def temperature_c(self) -> np.ndarray:
+        return self.fields["temperature"]
 
-def dewpoint_from_relative_humidity(temperature_c: np.ndarray, relative_humidity: np.ndarray) -> np.ndarray:
-    """Magnus formula (Alduchov & Eskridge 1996)."""
-    a, b = 17.625, 243.04
-    humidity = np.clip(np.asarray(relative_humidity, dtype=float), 0.5, 100.0)
-    with np.errstate(invalid="ignore"):
-        gamma = np.log(humidity / 100.0) + a * temperature_c / (b + temperature_c)
-        return b * gamma / (a - gamma)
+    @property
+    def dewpoint_c(self) -> np.ndarray:
+        return self.fields["dewpoint"]
 
 
 def interpolate_columns(
@@ -174,26 +171,41 @@ def column_diagnostics(
     )
 
 
-def spatial_columns(repository: DataRepository, longitude: np.ndarray, latitude: np.ndarray) -> dict[str, np.ndarray]:
-    """Bilinearly interpolate ERA5 to points; arrays of shape ``(time, level, point)``."""
+def spatial_columns(
+    repository: DataRepository,
+    longitude: np.ndarray,
+    latitude: np.ndarray,
+    extra: tuple[str, ...] = (),
+) -> dict[str, np.ndarray]:
+    """Bilinearly interpolate ERA5 to points; arrays of shape ``(time, level, point)``.
+
+    ``extra`` ERA5 variables are returned under their short name, unconverted.
+    """
     points_lon = xr.DataArray(np.asarray(longitude, dtype=float), dims="point")
     points_lat = xr.DataArray(np.asarray(latitude, dtype=float), dims="point")
-    columns = repository.weather.interp(longitude=points_lon, latitude=points_lat, method="linear")
+    names = sorted({"z", "t", "r", "u", "v", *extra})
+    columns = repository.weather[names].interp(longitude=points_lon, latitude=points_lat, method="linear")
     columns = columns.transpose("time", "level", "point")
-    return {
+    result = {
         "height": np.asarray(columns["z"], dtype=float) / GRAVITY_M_S2,
         "temperature": np.asarray(columns["t"], dtype=float) - 273.15,
         "humidity": np.clip(np.asarray(columns["r"], dtype=float), 0.0, 100.0),
         "u": np.asarray(columns["u"], dtype=float),
         "v": np.asarray(columns["v"], dtype=float),
     }
+    for name in extra:
+        result[name] = np.asarray(columns[name], dtype=float)
+    return result
 
 
 def build_line_profiles(repository: DataRepository, corridor_id: str) -> LineProfiles:
     corridor = repository.get_corridor(corridor_id)
     distance_km, longitude, latitude = sample_line_geometry(corridor.geometry)
     terrain_m = repository.sample_terrain(longitude, latitude)
-    levels = spatial_columns(repository, longitude, latitude)
+    bearing_deg = track_bearing_deg(longitude, latitude)
+    variables = available_variables(repository.weather.data_vars)
+    extra = tuple(sorted(set().union(*(variable.requires for variable in variables.values()))))
+    levels = spatial_columns(repository, longitude, latitude, extra)
 
     level_hpa = np.asarray(repository.weather.level.values, dtype=float)
     level_height = levels["height"]
@@ -209,23 +221,37 @@ def build_line_profiles(repository: DataRepository, corridor_id: str) -> LinePro
         gridded = interpolate_columns(heights, np.moveaxis(values, 1, 0), targets, below_ground=mode)
         return np.where(under_terrain, np.nan, np.moveaxis(gridded, 0, 1))
 
-    temperature_grid = onto_grid(levels["temperature"], "lapse")
-    humidity_grid = onto_grid(levels["humidity"], "hold")
-    u_grid = onto_grid(levels["u"], "hold")
-    v_grid = onto_grid(levels["v"], "hold")
+    grid = {
+        "t": onto_grid(levels["temperature"], "lapse"),
+        "r": onto_grid(levels["humidity"], "hold"),
+        "u": onto_grid(levels["u"], "hold"),
+        "v": onto_grid(levels["v"], "hold"),
+        "p": onto_grid(pressure, "hold"),
+        "bearing": np.radians(bearing_deg),
+    }
+    for name in extra:
+        grid[name] = onto_grid(levels[name], "hold")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        fields = {key: np.asarray(variable.compute(grid), dtype=float) for key, variable in variables.items()}
 
     return LineProfiles(
         corridor=corridor,
-        track=TrackSamples(distance_km=distance_km, longitude=longitude, latitude=latitude, terrain_m=terrain_m),
+        track=TrackSamples(
+            distance_km=distance_km,
+            longitude=longitude,
+            latitude=latitude,
+            terrain_m=terrain_m,
+            bearing_deg=bearing_deg,
+        ),
         times=repository.times,
         altitude_m=altitude_m,
         level_hpa=level_hpa,
         level_height_m=level_height,
-        temperature_c=temperature_grid,
-        dewpoint_c=dewpoint_from_relative_humidity(temperature_grid, humidity_grid),
-        relative_humidity=humidity_grid,
-        wind_speed_ms=np.hypot(u_grid, v_grid),
-        pressure_hpa=onto_grid(pressure, "hold"),
+        variables=variables,
+        fields=fields,
+        u_ms=grid["u"],
+        v_ms=grid["v"],
+        pressure_hpa=grid["p"],
         diagnostics=column_diagnostics(
             level_height, levels["temperature"], levels["humidity"], levels["u"], levels["v"], terrain_m
         ),

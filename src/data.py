@@ -133,8 +133,12 @@ class DataRepository:
         dataset = xr.open_zarr(ERA5_DIR, consolidated=True, chunks=None)
         # Ascending latitude/longitude make xarray interpolation deterministic;
         # descending pressure means ascending altitude along the level axis.
+        # Every variable of the file is kept: optional ones (vorticity, …)
+        # become available in the cross-section through src/variables.py.
         dataset = dataset.sortby(["latitude", "longitude"]).sortby("level", ascending=False)
-        return dataset[sorted(EXPECTED_ERA5_VARIABLES)].load()
+        dims = {"time", "level", "latitude", "longitude"}
+        names = [name for name, array in dataset.data_vars.items() if set(array.dims) == dims]
+        return dataset[names].load()
 
     @cached_property
     def domain_bounds(self) -> tuple[float, float, float, float]:

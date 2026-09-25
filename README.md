@@ -9,12 +9,40 @@ de **coupes distance–altitude** lisibles en contexte opérationnel.
 | Vue | Question à laquelle elle répond |
 | --- | --- |
 | Carte du réseau | Quels corridors sont touchés à cette heure? Cliquer un corridor le sélectionne. |
-| Coupe atmosphérique | Quelle est la structure verticale au-dessus de la ligne (isotherme 0 °C, couche chaude, relief)? |
+| Coupe atmosphérique | Quelle est la structure verticale au-dessus de la ligne (isothermes, couche de fonte, vent, relief)? |
 | Bande « Précip. » | Quel type de précipitation la structure thermique favorise-t-elle (neige, grésil, verglas, pluie)? |
 | Indice le long du corridor | Quels kilomètres sont les plus exposés, et à quel aléa? |
-| Évolution sur 48 h | Où et quand l'indice culmine-t-il? |
+| Évolution sur 48 h | Où et quand l'indice culmine-t-il? Un clic choisit l'heure et le point. |
 | Sondage vertical | Profil T / point de rosée / vent à un point cliqué. |
-| Segments exposés | Tableau prêt pour la décision: tronçon, aléa, type, heure du pic. |
+| Tronçons exposés | Tableau prêt pour la décision; un clic isole le tronçon dans toutes les vues. |
+
+### Coupe interactive
+
+- **Fond**: isolignes remplies de la variable choisie (isothermes aux 2 °C pour
+  la température).
+- **Calques** superposables: isotherme 0 °C, couche de fonte (air > 0 °C
+  au-dessus d'air < 0 °C près des conducteurs), vecteurs de vent, niveaux ERA5,
+  et les isolignes de n'importe quelle autre variable (vent, θ, HR…).
+- **Vecteurs de vent**: vent horizontal vu du dessus (nord en haut), longueur
+  proportionnelle à la vitesse; l'infobulle donne les composantes
+  perpendiculaire et parallèle à la ligne.
+- **Zoom / translation**: glisser pour zoomer, molette, barre d'outils Plotly
+  pour la translation; double-clic pour revoir tout le corridor. Le zoom
+  horizontal est borné au corridor, le zoom vertical au plafond choisi.
+- **Tronçon**: le curseur sous la coupe, le zoom de la coupe et le tableau des
+  tronçons exposés partagent la même sélection. Elle filtre les indicateurs,
+  cadre le diagramme 48 h et recentre la carte.
+- **Plein écran**: le bouton ⤢ de chaque panneau (Échap pour revenir); les
+  contrôles de la coupe restent accessibles en plein écran.
+
+### Ajouter une variable
+
+Toutes les variables de la coupe sont décrites dans `src/variables.py`. Une
+nouvelle variable est une seule entrée `Variable(...)` dans `REGISTRY`: clé,
+libellé, unité, fonction de calcul sur la grille, palette, bornes et pas des
+isolignes. Elle apparaît automatiquement comme fond, comme isolignes et dans
+les infobulles. Si elle dépend d'un champ ERA5 optionnel (`requires={"vo"}`),
+elle n'est proposée que lorsque ce champ est présent dans le fichier.
 
 ## Site statique (GitHub Pages)
 
@@ -94,8 +122,8 @@ respectant la consigne.
 
 Sous le niveau 1000 hPa (qui flotte 100–300 m au-dessus de la mer), la
 température est extrapolée avec le gradient standard (6,5 °C/km); humidité et
-vent sont maintenus constants. L'atmosphère sous le relief est masquée. Les
-tirets gris de la coupe rappellent où se trouvent les niveaux réels.
+vent sont maintenus constants. L'atmosphère sous le relief est masquée. Le
+calque « Niveaux ERA5 » de la coupe rappelle où se trouvent les niveaux réels.
 
 ### 4. Diagnostic du type de précipitation
 
@@ -139,7 +167,9 @@ Catégories: Faible < 25, Modéré 25–49, Élevé 50–74, Critique ≥ 75.
 - `src/network.py`: fusion des segments en corridors, échantillonnage;
 - `src/data.py`: extraction, validation, accès ERA5 / relief / corridors;
 - `src/interpolation.py`: interpolation spatiale et verticale vectorisée;
+- `src/variables.py`: registre des variables de la coupe;
 - `src/risk.py`: aléas, type de précipitation, segments exposés;
 - `src/overview.py`: classement de tous les corridors;
-- `src/figures.py`: figures Plotly;
-- `tests/`: 13 tests unitaires et d'intégration (`.\.venv\Scripts\python.exe -m pytest -q`).
+- `src/figures.py`: figures Plotly et calques de la coupe;
+- `assets/`: styles et script du plein écran;
+- `tests/`: 17 tests unitaires et d'intégration (`.\.venv\Scripts\python.exe -m pytest -q`).
