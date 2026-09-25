@@ -5,12 +5,27 @@ const TERRAIN_FILL = "#8c6a4a";
 const TERRAIN_LINE = "#4b3621";
 const LAPSE = 0.0065;
 
+// Mirror of src/variables.py. A new variable needs an entry here and a formula in fieldValue().
 const VARIABLES = {
-  temperature: { label: "Température", unit: "°C", colorscale: "RdBu_r", zmin: -24, zmax: 8, zmid: 0 },
-  dewpoint: { label: "Point de rosée", unit: "°C", colorscale: "RdBu_r", zmin: -30, zmax: 6, zmid: 0 },
-  humidity: { label: "Humidité relative", unit: "%", colorscale: "YlGnBu", zmin: 20, zmax: 100 },
-  wind: { label: "Vent", unit: "km/h", colorscale: "Turbo", zmin: 0, zmax: 120, factor: 3.6 },
+  temperature: { label: "Température", unit: "°C", colorscale: "RdBu_r", zmin: -24, zmax: 8, zmid: 0, step: 2, digits: 1 },
+  theta: { label: "Température potentielle", unit: "K", colorscale: "Plasma", zmin: 255, zmax: 305, step: 3, digits: 0 },
+  dewpoint: { label: "Point de rosée", unit: "°C", colorscale: "RdBu_r", zmin: -30, zmax: 6, zmid: 0, step: 2, digits: 1 },
+  humidity: { label: "Humidité relative", unit: "%", colorscale: "YlGnBu", zmin: 20, zmax: 100, step: 10, digits: 0 },
+  wind: { label: "Vent", unit: "km/h", colorscale: "Viridis", zmin: 0, zmax: 120, step: 20, digits: 0 },
+  wind_cross: { label: "Vent perpendiculaire à la ligne", unit: "km/h", colorscale: "Viridis", zmin: 0, zmax: 100, step: 20, digits: 0 },
+  wind_along: { label: "Vent le long de la ligne (+ vers B)", unit: "km/h", colorscale: "PuOr", zmin: -80, zmax: 80, zmid: 0, step: 20, digits: 0 },
+  vorticity: { label: "Tourbillon relatif", unit: "10⁻⁵ s⁻¹", colorscale: "RdBu_r", zmin: -30, zmax: 30, zmid: 0, step: 5, digits: 0, needsVo: true },
 };
+
+const OVERLAYS = [
+  ["Isotherme 0 °C (fonte / regel)", "freezing"],
+  ["Couche de fonte au-dessus d'air < 0 °C", "melting"],
+  ["Vecteurs de vent", "wind"],
+  ["Niveaux ERA5 (hPa)", "levels"],
+];
+const ISOLINE_COLORS = ["#6d28d9", "#0f766e", "#9a3412", "#1d4ed8", "#be185d"];
+const MELTING_COLOR = "rgba(224,123,57,0.35)";
+const MIN_SEGMENT_KM = 5;
 
 const CATEGORY_COLORS = {
   Faible: "#4f9d69",
@@ -54,11 +69,16 @@ const state = {
   corridorId: null,
   time: 0,
   variable: "temperature",
+  overlays: new Set(["freezing", "wind"]),
+  isolines: new Set(),
   cap: 6,
   basemap: "online",
   selection: null,
+  lo: 0,
+  hi: null,
   playing: false,
   timer: null,
+  rendering: false,
 };
 
 function b64bytes(value) {
@@ -164,6 +184,7 @@ function sliceLevels(corridor, time) {
     const humidity = [];
     const u = [];
     const v = [];
+    const vo = [];
     for (let level = 0; level < nLevel; level += 1) {
       const offset = (time * nLevel + level) * nPoint + point;
       height.push(corridor.height[offset]);
@@ -171,18 +192,47 @@ function sliceLevels(corridor, time) {
       humidity.push(corridor.humidity[offset]);
       u.push(corridor.u[offset]);
       v.push(corridor.v[offset]);
+      if (corridor.vo) vo.push(corridor.vo[offset]);
     }
-    byPoint.push({ height, temperature, humidity, u, v });
+    byPoint.push({ height, temperature, humidity, u, v, vo });
   }
   return byPoint;
 }
 
+function bearingRadians(lon, lat) {
+  const n = lon.length;
+  const out = new Array(n).fill(0);
+  for (let i = 0; i < n; i += 1) {
+    const a = Math.max(0, i - 1);
+    const b = Math.min(n - 1, i + 1);
+    const dLon = ((lon[b] - lon[a]) * Math.PI) / 180;
+    const lat1 = (lat[a] * Math.PI) / 180;
+    const lat2 = (lat[b] * Math.PI) / 180;
+    const y = Math.sin(dLon) * Math.cos(lat2);
+    const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+    out[i] = Math.atan2(y, x);
+  }
+  return out;
+}
+
+function fillBelow(rows) {
+  const copy = rows.map((row) => row.slice());
+  for (let point = 0; point < copy[0].length; point += 1) {
+    let value = NaN;
+    for (let z = copy.length - 1; z >= 0; z -= 1) {
+      if (Number.isFinite(copy[z][point])) value = copy[z][point];
+      else if (Number.isFinite(value)) copy[z][point] = value;
+    }
+  }
+  return copy;
+}
+
 function grids(corridor, time, capKm) {
+  const key = `${corridor.id}|${time}|${capKm}`;
+  if (corridor.gridCache && corridor.gridCache.key === key) return corridor.gridCache.value;
   const columns = sliceLevels(corridor, time);
-  const step = 100;
-  const top = capKm * 1000;
   const altitude = [];
-  for (let z = 0; z <= top + 0.1; z += step) altitude.push(z);
+  for (let z = 0; z <= capKm * 1000 + 0.1; z += 100) altitude.push(z);
   const nZ = altitude.length;
   const nPoint = corridor.n;
   const blank = () => Array.from({ length: nZ }, () => new Array(nPoint).fill(NaN));
@@ -190,10 +240,17 @@ function grids(corridor, time, capKm) {
   const dew = blank();
   const humidity = blank();
   const wind = blank();
+  const windCross = blank();
+  const windAlong = blank();
+  const theta = blank();
   const pressure = blank();
+  const vorticity = corridor.vo ? blank() : null;
+  const uMs = blank();
+  const vMs = blank();
   for (let point = 0; point < nPoint; point += 1) {
     const col = columns[point];
     const terrain = corridor.terrain[point];
+    const bear = corridor.bearing[point];
     for (let z = 0; z < nZ; z += 1) {
       if (altitude[z] < terrain) continue;
       const t = interpColumn(col.height, col.temperature, altitude[z], "lapse");
@@ -204,11 +261,25 @@ function grids(corridor, time, capKm) {
       temperature[z][point] = t;
       humidity[z][point] = rh;
       dew[z][point] = dewpoint(t, rh);
-      wind[z][point] = Math.hypot(u, v);
+      wind[z][point] = Math.hypot(u, v) * 3.6;
+      windCross[z][point] = Math.abs(u * Math.cos(bear) - v * Math.sin(bear)) * 3.6;
+      windAlong[z][point] = (u * Math.sin(bear) + v * Math.cos(bear)) * 3.6;
+      theta[z][point] = (t + 273.15) * (1000 / p) ** 0.2857;
       pressure[z][point] = p;
+      uMs[z][point] = u;
+      vMs[z][point] = v;
+      if (vorticity) {
+        const vo = interpColumn(col.height, col.vo, altitude[z], "hold");
+        vorticity[z][point] = vo * 1e5;
+      }
     }
   }
-  return { altitude, temperature, dewpoint: dew, humidity, wind, pressure, columns };
+  const value = {
+    altitude, temperature, dewpoint: dew, humidity, wind, wind_cross: windCross, wind_along: windAlong,
+    theta, pressure, vorticity, uMs, vMs, columns,
+  };
+  corridor.gridCache = { key, value };
+  return value;
 }
 
 function profileColumn(corridor, time, point, capKm) {
@@ -266,7 +337,9 @@ function resolvePoint(corridor, time) {
           best = i;
         }
       }
-      return { index: best, hint: `Point choisi sur la coupe · km ${corridor.distance[best].toFixed(1)}` };
+      if (corridor.distance[best] >= state.lo - 0.01 && corridor.distance[best] <= state.hi + 0.01) {
+        return { index: best, hint: `Point choisi · km ${corridor.distance[best].toFixed(1)}` };
+      }
     }
     if (selection.lon != null) {
       let best = 0;
@@ -278,12 +351,15 @@ function resolvePoint(corridor, time) {
           best = i;
         }
       }
-      return { index: best, hint: `Point choisi sur la carte · km ${corridor.distance[best].toFixed(1)}` };
+      if (corridor.distance[best] >= state.lo - 0.01 && corridor.distance[best] <= state.hi + 0.01) {
+        return { index: best, hint: `Point choisi · km ${corridor.distance[best].toFixed(1)}` };
+      }
     }
   }
   let best = 0;
   let score = -1;
   for (let i = 0; i < corridor.n; i += 1) {
+    if (corridor.distance[i] < state.lo - 0.01 || corridor.distance[i] > state.hi + 0.01) continue;
     const value = at2(corridor.score, time, i, corridor.n);
     const filled = Number.isFinite(value) ? value : -1;
     if (filled > score) {
@@ -291,7 +367,7 @@ function resolvePoint(corridor, time) {
       best = i;
     }
   }
-  return { index: best, hint: `Point le plus exposé à cette heure · km ${corridor.distance[best].toFixed(1)}` };
+  return { index: best, hint: `Point le plus exposé · km ${corridor.distance[best].toFixed(1)}` };
 }
 
 function baseLayout(extra) {
@@ -304,194 +380,270 @@ function baseLayout(extra) {
   return layout;
 }
 
+function contourLevels(meta, rows) {
+  const step = meta.step;
+  let lo = meta.zmin;
+  let hi = meta.zmax;
+  if (lo == null || hi == null) {
+    const flat = rows.flat().filter((value) => Number.isFinite(value));
+    lo = flat.length ? Math.min(...flat) : 0;
+    hi = flat.length ? Math.max(...flat) : step;
+  }
+  return { start: Math.floor(lo / step) * step, end: Math.ceil(hi / step) * step, size: step };
+}
+
+function compass(deg) {
+  const names = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"];
+  return names[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+}
+
+function windArrows(corridor, grid, cap) {
+  const distance = corridor.distance;
+  const altitudeKm = grid.altitude.map((z) => z / 1000);
+  const columns = [];
+  for (let i = 0; i < corridor.n; i += 1) {
+    if (distance[i] >= state.lo - 0.01 && distance[i] <= state.hi + 0.01) columns.push(i);
+  }
+  if (!columns.length) return [];
+  const pickedCols = [];
+  const count = Math.min(26, columns.length);
+  for (let i = 0; i < count; i += 1) pickedCols.push(columns[Math.round((i * (columns.length - 1)) / Math.max(1, count - 1))]);
+  const uniqueCols = [...new Set(pickedCols)];
+  const targets = [];
+  for (let y = cap / 12; y < cap; y += cap / 12) targets.push(y);
+  const levels = [...new Set(targets.map((target) => {
+    let best = 0;
+    let gap = Infinity;
+    altitudeKm.forEach((value, index) => {
+      const delta = Math.abs(value - target);
+      if (delta < gap) {
+        gap = delta;
+        best = index;
+      }
+    });
+    return best;
+  }))];
+  const x = [];
+  const y = [];
+  const toward = [];
+  const speed = [];
+  const hover = [];
+  levels.forEach((level) => {
+    uniqueCols.forEach((point) => {
+      const u = grid.uMs[level][point];
+      const v = grid.vMs[level][point];
+      if (!Number.isFinite(u) || !Number.isFinite(v)) return;
+      const kmh = Math.hypot(u, v) * 3.6;
+      const direction = (Math.atan2(u, v) * 180) / Math.PI;
+      const to = (direction + 360) % 360;
+      const source = (to + 180) % 360;
+      const bear = corridor.bearing[point];
+      const cross = Math.abs(u * Math.cos(bear) - v * Math.sin(bear)) * 3.6;
+      const along = (u * Math.sin(bear) + v * Math.cos(bear)) * 3.6;
+      x.push(distance[point]);
+      y.push(altitudeKm[level]);
+      toward.push(to);
+      speed.push(kmh);
+      hover.push(`km ${distance[point].toFixed(1)} · ${altitudeKm[level].toFixed(1)} km<br><b>Vent ${kmh.toFixed(0)} km/h du ${compass(source)} (${source.toFixed(0)}°)</b><br>Perpendiculaire à la ligne: ${cross.toFixed(0)} km/h · le long: ${along >= 0 ? "+" : ""}${along.toFixed(0)} km/h`);
+    });
+  });
+  if (!x.length) return [];
+  const length = speed.map((value) => 8 + 22 * Math.min(1, value / 100));
+  const common = { x, y, mode: "markers", legendgroup: "wind", xaxis: "x", yaxis: "y" };
+  return [
+    { ...common, marker: { symbol: "line-ns-open", angle: toward, size: length, color: "rgba(255,255,255,0.8)", line: { width: 3.4 } }, hoverinfo: "skip", showlegend: false },
+    { ...common, marker: { symbol: "line-ns-open", angle: toward, size: length, color: "#111827", line: { width: 1.5 } }, hoverinfo: "skip", showlegend: false },
+    { ...common, marker: { symbol: "arrow", angle: toward, size: 8, color: "#111827", line: { color: "#ffffff", width: 0.8 } }, hovertext: hover, hoverinfo: "text", name: "Vent (vu du dessus, nord ↑)" },
+  ];
+}
+
 function drawCrossSection(corridor, time, point) {
   const cap = state.cap;
-  const meta = VARIABLES[state.variable];
-  const factor = meta.factor || 1;
+  const available = corridor.vo ? VARIABLES : Object.fromEntries(Object.entries(VARIABLES).filter(([, meta]) => !meta.needsVo));
+  const background = available[state.variable] ? state.variable : "temperature";
+  const meta = available[background];
   const grid = grids(corridor, time, cap);
   const altitudeKm = grid.altitude.map((z) => z / 1000);
-  const values = grid[state.variable].map((row) => row.map((value) => value * factor));
   const distance = corridor.distance;
-  const precip = [];
-  for (let i = 0; i < corridor.n; i += 1) precip.push(at2(corridor.precip, time, i, corridor.n));
-  const score = [];
-  for (let i = 0; i < corridor.n; i += 1) score.push(at2(corridor.score, time, i, corridor.n));
-  const peaks = peakByPoint(corridor).peaks.map((value) => (value < 0 ? NaN : value));
-  const hoverRisk = distance.map((km, i) => {
-    const value = score[i];
-    return `<b>km ${km.toFixed(1)} · ${category(value)}</b><br>Indice: ${(Number.isFinite(value) ? value : 0).toFixed(0)}/100 · ${hazardLabel(at2(corridor.dominant, time, i, corridor.n))}<br>Près du sol: ${at2(corridor.nearT, time, i, corridor.n).toFixed(1)} °C, HR ${at2(corridor.nearRh, time, i, corridor.n).toFixed(0)} %, vent ${(at2(corridor.nearWind, time, i, corridor.n) * 3.6).toFixed(0)} km/h<br>Couche la plus chaude 0,3–3 km: ${at2(corridor.warm, time, i, corridor.n).toFixed(1)} °C<br>Type: ${PRECIPITATION_TYPES[precip[i]]}`;
+  const filled = {};
+  Object.keys(available).forEach((key) => {
+    if (grid[key]) filled[key] = fillBelow(grid[key]);
   });
-  const traces = [
-    {
-      type: "heatmap",
-      x: distance,
-      y: altitudeKm,
-      z: values,
-      customdata: grid.pressure,
-      colorscale: meta.colorscale,
-      zmin: meta.zmin,
-      zmax: meta.zmax,
-      zmid: meta.zmid,
-      colorbar: { title: { text: `${meta.label}<br>(${meta.unit})`, side: "right" }, thickness: 14, len: 0.62, y: 1, yanchor: "top", x: 1.005 },
-      hovertemplate: `km %{x:.1f} · %{y:.2f} km d'altitude<br>${meta.label}: %{z:.1f} ${meta.unit}<br>Pression ≈ %{customdata:.0f} hPa<extra></extra>`,
-      connectgaps: false,
-      hoverongaps: false,
-      name: meta.label,
-      xaxis: "x",
-      yaxis: "y",
-    },
-    {
+  const isolines = [...state.isolines].filter((key) => key !== background && filled[key]);
+  const hoverKeys = isolines.slice();
+  if (state.overlays.has("wind") && background !== "wind" && !hoverKeys.includes("wind")) hoverKeys.push("wind");
+  const customdata = altitudeKm.map((_, z) => distance.map((__, i) => [grid.pressure[z][i], ...hoverKeys.map((key) => grid[key][z][i])]));
+  const hover = [
+    "km %{x:.1f} · %{y:.2f} km d'altitude",
+    `<b>${meta.label}: %{z:.${meta.digits}f} ${meta.unit}</b>`,
+    ...hoverKeys.map((key, index) => `${available[key].label}: %{customdata[${index + 1}]:.${available[key].digits}f} ${available[key].unit}`),
+    "Pression ≈ %{customdata[0]:.0f} hPa<extra></extra>",
+  ].join("<br>");
+  const traces = [{
+    type: "contour",
+    x: distance,
+    y: altitudeKm,
+    z: filled[background],
+    customdata,
+    colorscale: meta.colorscale,
+    zmin: meta.zmin,
+    zmax: meta.zmax,
+    zmid: meta.zmid,
+    contours: { ...contourLevels(meta, filled[background]), coloring: "fill", showlines: true, showlabels: true, labelfont: { size: 9, color: "rgba(17,24,39,0.7)" } },
+    line: { width: 0.5, color: "rgba(255,255,255,0.6)" },
+    colorbar: { title: { text: `${meta.label}<br>(${meta.unit})`, side: "right" }, thickness: 12, len: 0.66, y: 1, yanchor: "top", x: 1.005 },
+    hovertemplate: hover,
+    connectgaps: false,
+    name: meta.label,
+    showlegend: false,
+    xaxis: "x",
+    yaxis: "y",
+  }];
+  isolines.forEach((key, index) => {
+    const variable = available[key];
+    const color = ISOLINE_COLORS[index % ISOLINE_COLORS.length];
+    traces.push({
       type: "contour",
       x: distance,
       y: altitudeKm,
-      z: grid.temperature,
-      contours: { start: 0, end: 0, size: 1, coloring: "lines", showlabels: false },
-      line: { color: "#111827", width: 2.2, dash: "dot" },
+      z: filled[key],
+      contours: { ...contourLevels(variable, filled[key]), coloring: "lines", showlabels: true, labelfont: { size: 10, color } },
+      colorscale: [[0, color], [1, color]],
+      line: { width: 1.3 },
+      showscale: false,
+      hoverinfo: "skip",
+      name: `${variable.label} (${variable.unit})`,
+      showlegend: true,
+      xaxis: "x",
+      yaxis: "y",
+    });
+  });
+  if (state.overlays.has("melting")) {
+    const cold = distance.map((_, i) => at2(corridor.nearT, time, i, corridor.n) <= 0);
+    const melting = grid.temperature.map((row, z) => row.map((value, i) => (Number.isFinite(value) && value > 0 && cold[i] ? 1 : 0)));
+    traces.push({
+      type: "contour",
+      x: distance,
+      y: altitudeKm,
+      z: melting,
+      zmin: 0,
+      zmax: 1,
+      contours: { start: 0.5, end: 0.5, size: 1, coloring: "fill" },
+      colorscale: [[0, "rgba(0,0,0,0)"], [1, MELTING_COLOR]],
+      line: { color: "#b4541a", width: 1.3, dash: "dash" },
+      showscale: false,
+      hoverinfo: "skip",
+      name: "Couche de fonte (> 0 °C sur air froid)",
+      showlegend: true,
+      xaxis: "x",
+      yaxis: "y",
+    });
+  }
+  if (state.overlays.has("freezing")) {
+    traces.push({
+      type: "contour",
+      x: distance,
+      y: altitudeKm,
+      z: filled.temperature,
+      contours: { start: 0, end: 0, size: 1, coloring: "lines", showlabels: true, labelfont: { size: 10, color: "#111827" } },
+      colorscale: [[0, "#111827"], [1, "#111827"]],
+      line: { width: 2.4, dash: "dot" },
       showscale: false,
       hoverinfo: "skip",
       name: "Isotherme 0 °C",
       showlegend: true,
-      connectgaps: false,
       xaxis: "x",
       yaxis: "y",
-    },
-  ];
+    });
+  }
   const annotations = [];
-  corridor.levels.forEach((level, levelIndex) => {
-    const heights = column(corridor.height, time, levelIndex, corridor.levels.length, corridor.n).map((value) => value / 1000);
-    const mid = heights.slice().sort((a, b) => a - b)[Math.floor(heights.length / 2)];
-    if (mid > cap) return;
-    traces.push({
-      type: "scatter",
-      x: distance,
-      y: heights,
-      mode: "lines",
-      line: { color: "rgba(17,24,39,0.45)", width: 1, dash: "dash" },
-      hovertemplate: `Niveau ERA5 ${level.toFixed(0)} hPa · %{y:.2f} km<extra></extra>`,
-      showlegend: false,
-      xaxis: "x",
-      yaxis: "y",
+  if (state.overlays.has("levels")) {
+    let last = corridor.n - 1;
+    for (let i = corridor.n - 1; i >= 0; i -= 1) {
+      if (distance[i] <= state.hi + 0.01) {
+        last = i;
+        break;
+      }
+    }
+    corridor.levels.forEach((level, levelIndex) => {
+      const heights = column(corridor.height, time, levelIndex, corridor.levels.length, corridor.n).map((value) => value / 1000);
+      const sorted = heights.slice().sort((a, b) => a - b);
+      if (sorted[Math.floor(sorted.length / 2)] > cap) return;
+      traces.push({
+        type: "scatter",
+        x: distance,
+        y: heights,
+        mode: "lines",
+        line: { color: "rgba(17,24,39,0.4)", width: 1, dash: "dash" },
+        hovertemplate: `Niveau ERA5 ${level.toFixed(0)} hPa · %{y:.2f} km<extra></extra>`,
+        showlegend: false,
+        xaxis: "x",
+        yaxis: "y",
+      });
+      annotations.push({
+        x: distance[last], y: heights[last], text: `${level.toFixed(0)} hPa`, showarrow: false,
+        xanchor: "right", yanchor: "bottom", font: { size: 10, color: "rgba(17,24,39,0.7)" },
+        bgcolor: "rgba(255,255,255,0.6)", xref: "x", yref: "y",
+      });
     });
-    annotations.push({
-      x: distance[distance.length - 1],
-      y: heights[heights.length - 1],
-      text: `${level.toFixed(0)} hPa`,
-      showarrow: false,
-      xanchor: "right",
-      yanchor: "bottom",
-      font: { size: 10, color: "rgba(17,24,39,0.7)" },
-      bgcolor: "rgba(255,255,255,0.6)",
-      xref: "x",
-      yref: "y",
-    });
-  });
+  }
+  if (state.overlays.has("wind")) traces.push(...windArrows(corridor, grid, cap));
+  const precip = [];
+  const score = [];
+  for (let i = 0; i < corridor.n; i += 1) {
+    precip.push(at2(corridor.precip, time, i, corridor.n));
+    score.push(at2(corridor.score, time, i, corridor.n));
+  }
+  const peaks = peakByPoint(corridor).peaks.map((value) => (value < 0 ? NaN : value));
+  const hoverRisk = distance.map((km, i) => `<b>km ${km.toFixed(1)} · ${category(score[i])}</b><br>Indice: ${(Number.isFinite(score[i]) ? score[i] : 0).toFixed(0)}/100 · ${hazardLabel(at2(corridor.dominant, time, i, corridor.n))}<br>Près du sol: ${at2(corridor.nearT, time, i, corridor.n).toFixed(1)} °C, HR ${at2(corridor.nearRh, time, i, corridor.n).toFixed(0)} %, vent ${(at2(corridor.nearWind, time, i, corridor.n) * 3.6).toFixed(0)} km/h<br>Couche la plus chaude 0,3–3 km: ${at2(corridor.warm, time, i, corridor.n).toFixed(1)} °C<br>Type: ${PRECIPITATION_TYPES[precip[i]]}`);
   traces.push(
     {
-      type: "scatter",
-      x: distance,
-      y: corridor.terrain.map((value) => value / 1000),
-      mode: "lines",
-      line: { color: TERRAIN_LINE, width: 1.5 },
-      fill: "tozeroy",
-      fillcolor: TERRAIN_FILL,
-      name: "Relief (ETOPO)",
-      hovertemplate: "km %{x:.1f} · relief %{y:.2f} km<extra></extra>",
-      xaxis: "x",
-      yaxis: "y",
+      type: "scatter", x: distance, y: corridor.terrain.map((value) => value / 1000), mode: "lines",
+      line: { color: TERRAIN_LINE, width: 1.5 }, fill: "tozeroy", fillcolor: TERRAIN_FILL, name: "Relief (ETOPO)",
+      showlegend: false, hovertemplate: "km %{x:.1f} · relief %{y:.2f} km<extra></extra>", xaxis: "x", yaxis: "y",
     },
     {
-      type: "heatmap",
-      x: distance,
-      y: [0],
-      z: [precip],
-      zmin: 0,
-      zmax: PRECIPITATION_TYPES.length,
-      colorscale: PRECIPITATION_COLORSCALE,
-      showscale: false,
+      type: "heatmap", x: distance, y: [0], z: [precip], zmin: 0, zmax: PRECIPITATION_TYPES.length,
+      colorscale: PRECIPITATION_COLORSCALE, showscale: false,
       hovertext: [distance.map((km, i) => `km ${km.toFixed(1)}: ${PRECIPITATION_TYPES[precip[i]]}`)],
-      hoverinfo: "text",
-      name: "Type de précipitation",
-      xaxis: "x2",
-      yaxis: "y2",
+      hoverinfo: "text", name: "Type de précipitation", xaxis: "x2", yaxis: "y2",
     },
     {
-      type: "scatter",
-      x: distance,
-      y: peaks,
-      mode: "lines",
-      line: { color: "rgba(17,24,39,0.35)", width: 1.5, dash: "dot" },
-      name: "Maximum sur 48 h",
-      hovertemplate: "km %{x:.1f} · max 48 h: %{y:.0f}<extra></extra>",
-      xaxis: "x3",
-      yaxis: "y3",
+      type: "scatter", x: distance, y: peaks, mode: "lines",
+      line: { color: "rgba(17,24,39,0.35)", width: 1.5, dash: "dot" }, name: "Maximum sur 48 h",
+      hovertemplate: "km %{x:.1f} · max 48 h: %{y:.0f}<extra></extra>", xaxis: "x3", yaxis: "y3",
     },
     {
-      type: "scatter",
-      x: distance,
-      y: score,
-      mode: "lines+markers",
-      line: { color: "#111827", width: 2 },
-      marker: {
-        size: 7,
-        color: score.map((value) => (Number.isFinite(value) ? value : 0)),
-        cmin: 0,
-        cmax: 100,
-        colorscale: RISK_COLORSCALE,
-        line: { color: "#ffffff", width: 1 },
-      },
-      fill: "tozeroy",
-      fillcolor: "rgba(17,24,39,0.06)",
-      name: "Indice à cette heure",
-      hovertext: hoverRisk,
-      hoverinfo: "text",
-      xaxis: "x3",
-      yaxis: "y3",
+      type: "scatter", x: distance, y: score, mode: "lines+markers", line: { color: "#111827", width: 2 },
+      marker: { size: 7, color: score.map((value) => (Number.isFinite(value) ? value : 0)), cmin: 0, cmax: 100, colorscale: RISK_COLORSCALE, line: { color: "#ffffff", width: 1 } },
+      fill: "tozeroy", fillcolor: "rgba(17,24,39,0.06)", name: "Indice à cette heure",
+      hovertext: hoverRisk, hoverinfo: "text", xaxis: "x3", yaxis: "y3",
     },
   );
-  const shapes = [
-    ["Faible", 0, 25],
-    ["Modéré", 25, 50],
-    ["Élevé", 50, 75],
-    ["Critique", 75, 100],
-  ].map(([name, y0, y1]) => ({
-    type: "rect",
-    xref: "x3 domain",
-    yref: "y3",
-    x0: 0,
-    x1: 1,
-    y0,
-    y1,
-    fillcolor: CATEGORY_COLORS[name],
-    opacity: 0.1,
-    line: { width: 0 },
+  const shapes = [["Faible", 0, 25], ["Modéré", 25, 50], ["Élevé", 50, 75], ["Critique", 75, 100]].map(([name, y0, y1]) => ({
+    type: "rect", xref: "x3 domain", yref: "y3", x0: 0, x1: 1, y0, y1, fillcolor: CATEGORY_COLORS[name], opacity: 0.1, line: { width: 0 },
   }));
-  shapes.push({
-    type: "line",
-    xref: "x",
-    yref: "paper",
-    x0: distance[point],
-    x1: distance[point],
-    y0: 0,
-    y1: 1,
-    line: { color: "#111827", width: 1.5 },
-    opacity: 0.8,
-  });
+  shapes.push({ type: "line", xref: "x", yref: "paper", x0: distance[point], x1: distance[point], y0: 0, y1: 1, line: { color: "#111827", width: 1.5 }, opacity: 0.8 });
+  const xRange = [state.lo, Math.min(state.hi, distance[distance.length - 1])];
   const layout = baseLayout({
-    height: 640,
+    autosize: true,
     margin: { l: 56, r: 90, t: 36, b: 48 },
     annotations,
     shapes,
-    legend: { orientation: "h", y: 1.04, x: 0, yanchor: "bottom", font: { size: 11 } },
+    legend: { orientation: "h", y: 1.02, x: 0, yanchor: "bottom", font: { size: 11 } },
     clickmode: "event",
-    xaxis: { domain: [0, 1], anchor: "y", showticklabels: false, range: [distance[0], distance[distance.length - 1]] },
-    yaxis: { domain: [0.4048, 1], anchor: "x", title: { text: "Altitude (km)" }, range: [0, cap] },
+    dragmode: "zoom",
+    uirevision: `${corridor.id}|${cap}`,
+    xaxis: { domain: [0, 1], anchor: "y", showticklabels: false, range: xRange, minallowed: distance[0], maxallowed: distance[distance.length - 1] },
+    yaxis: { domain: [0.3608, 1], anchor: "x", title: { text: "Altitude (km)" }, range: [0, cap], minallowed: 0, maxallowed: cap },
     xaxis2: { domain: [0, 1], anchor: "y2", matches: "x", showticklabels: false },
-    yaxis2: { domain: [0.2861, 0.3698], anchor: "x2", title: { text: "Précip." }, showticklabels: false },
+    yaxis2: { domain: [0.265, 0.3308], anchor: "x2", title: { text: "Précip." }, showticklabels: false, fixedrange: true },
     xaxis3: { domain: [0, 1], anchor: "y3", matches: "x", title: { text: "Distance le long du corridor (km) — A → B" } },
-    yaxis3: { domain: [0, 0.2511], anchor: "x3", title: { text: "Indice" }, range: [0, 102], dtick: 25 },
+    yaxis3: { domain: [0, 0.235], anchor: "x3", title: { text: "Indice" }, range: [0, 102], dtick: 25, fixedrange: true },
   });
-  Plotly.react("cross-section", traces, layout, { displaylogo: false, displayModeBar: "hover", responsive: true });
+  Plotly.react("cross-section", traces, layout, { displaylogo: false, displayModeBar: "hover", responsive: true, scrollZoom: true, doubleClick: "reset", modeBarButtonsToRemove: ["lasso2d", "select2d", "autoScale2d"] });
 }
+
 
 function pathArrays(encoded) {
   return { lon: unpack(encoded[0], "f32"), lat: unpack(encoded[1], "f32") };
@@ -517,7 +669,9 @@ function drawMap(corridor, time, point) {
     const ids = [];
     network.corridors.forEach((item, index) => {
       if (category(scores[index]) !== name || item.id === corridor.id) return;
-      const path = pathArrays(network.paths[item.id]);
+      const encoded = network.paths[item.id];
+      if (!encoded) return;
+      const path = pathArrays(encoded);
       const score = scores[index];
       const hover = Number.isFinite(score) ? `${item.label}<br>Indice: ${score.toFixed(0)}/100 · ${name}` : item.label;
       lon.push(...path.lon, null);
@@ -551,14 +705,26 @@ function drawMap(corridor, time, point) {
       ? `<b>${corridor.label}</b><br>km ${corridor.distance[i].toFixed(1)}<br>Indice: ${score.toFixed(0)}/100 · ${category(score)}<br>${hazardLabel(at2(corridor.dominant, time, i, corridor.n))}`
       : `<b>${corridor.label}</b><br>km ${corridor.distance[i].toFixed(1)}`);
   }
+  const inRange = corridor.distance.map((km) => km >= state.lo - 0.01 && km <= state.hi + 0.01);
+  const partial = inRange.some((value) => !value);
+  const viewLon = corridor.lon.filter((_, i) => inRange[i]);
+  const viewLat = corridor.lat.filter((_, i) => inRange[i]);
   traces.push(
     geo(basemap, corridor.lon, corridor.lat, {
       mode: "lines",
-      line: { width: 7, color: "#111827" },
+      line: { width: partial ? 4 : 7, color: "#111827" },
+      opacity: partial ? 0.45 : 1,
       hoverinfo: "skip",
       name: "Corridor sélectionné",
       showlegend: false,
     }),
+  );
+  if (partial) {
+    traces.push(geo(basemap, viewLon, viewLat, {
+      mode: "lines", line: { width: 10, color: "#111827" }, hoverinfo: "skip", showlegend: false,
+    }));
+  }
+  traces.push(
     geo(basemap, corridor.lon, corridor.lat, {
       mode: "markers",
       marker: { size: 9, color: pointScores, cmin: 0, cmax: 100, colorscale: RISK_COLORSCALE, showscale: false },
@@ -586,15 +752,15 @@ function drawMap(corridor, time, point) {
       showlegend: false,
     }),
   );
-  const centerLon = mean(corridor.lon);
-  const centerLat = mean(corridor.lat);
+  const centerLon = mean(viewLon);
+  const centerLat = mean(viewLat);
   const legend = {
     orientation: "h", y: 0.01, x: 0.01, yanchor: "bottom", xanchor: "left",
     bgcolor: "rgba(255,255,255,0.85)", title: { text: "Réseau à cette heure" }, font: { size: 11 },
   };
   let layout;
   if (basemap) {
-    const span = Math.max(ptp(corridor.lon), ptp(corridor.lat) * 1.4, 0.15);
+    const span = Math.max(ptp(viewLon), ptp(viewLat) * 1.4, 0.15);
     const zoom = Math.min(10.5, Math.max(4.5, 8.6 - Math.log2(span * 8)));
     layout = baseLayout({
       height: 440,
@@ -604,8 +770,8 @@ function drawMap(corridor, time, point) {
       showlegend: true,
     });
   } else {
-    const halfLon = Math.max(ptp(corridor.lon) * 0.75, 1.2);
-    const halfLat = Math.max(ptp(corridor.lat) * 0.75, 0.8);
+    const halfLon = Math.max(ptp(viewLon) * 0.75, partial ? 0.6 : 1.2);
+    const halfLat = Math.max(ptp(viewLat) * 0.75, partial ? 0.4 : 0.8);
     layout = baseLayout({
       height: 440,
       margin: { l: 48, r: 12, t: 8, b: 40 },
@@ -649,7 +815,8 @@ function drawHovmoller(corridor, time) {
       xanchor: "left", yanchor: "bottom", font: { size: 10, color: "#111827" }, bgcolor: "rgba(255,255,255,0.75)",
     }],
     yaxis: { title: { text: "Échéance (heure locale)" }, tickvals: ticks, ticktext: ticks.map((index) => labels[index]), autorange: "reversed" },
-    xaxis: { title: { text: "Distance le long du corridor (km)" } },
+    xaxis: { title: { text: "Distance le long du corridor (km)" }, range: [state.lo, state.hi], minallowed: corridor.distance[0], maxallowed: corridor.distance[corridor.n - 1] },
+    clickmode: "event",
   });
   Plotly.react("hovmoller", [{
     type: "heatmap",
@@ -716,6 +883,8 @@ function renderHeader(corridor, time) {
     `<span class="chip">${corridor.region.replaceAll("/", " · ")}</span>`,
   ];
   if (corridor.parts > 1) chips.push(`<span class="chip">tronçon ${corridor.part}/${corridor.parts}</span>`);
+  const full = state.lo <= 0.05 && state.hi >= corridor.distance[corridor.n - 1] - 0.05;
+  if (!full) chips.push(`<span class="chip focus">vue: km ${state.lo.toFixed(0)} → ${state.hi.toFixed(0)}</span>`);
   document.getElementById("corridor-header").innerHTML = `
     <div><h2>Ligne ${corridor.line}</h2><div class="chips">${chips.join("")}</div></div>
     <div class="network-status">
@@ -734,7 +903,12 @@ function renderKpis(corridor, time) {
   const humid = [];
   const spacing = n > 1 ? (corridor.distance[n - 1] - corridor.distance[0]) / (n - 1) : 0;
   const kilometres = Object.fromEntries(PRECIPITATION_TYPES.map((name) => [name, 0]));
+  const indexes = [];
   for (let i = 0; i < n; i += 1) {
+    if (corridor.distance[i] >= state.lo - 0.01 && corridor.distance[i] <= state.hi + 0.01) indexes.push(i);
+  }
+  const scope = indexes.length === n ? "à cette heure" : "sur le tronçon";
+  for (const i of indexes) {
     const score = at2(corridor.score, time, i, n);
     if (Number.isFinite(score) && score > worstScore) {
       worstScore = score;
@@ -747,8 +921,8 @@ function renderKpis(corridor, time) {
   }
   const nowCat = category(worstScore);
   const { peaks, when } = peakByPoint(corridor);
-  let peakPoint = 0;
-  for (let i = 1; i < n; i += 1) if (peaks[i] > peaks[peakPoint]) peakPoint = i;
+  let peakPoint = indexes[0] || 0;
+  indexes.forEach((i) => { if (peaks[i] > peaks[peakPoint]) peakPoint = i; });
   const peakCat = category(peaks[peakPoint]);
   const wet = Object.entries(kilometres).filter(([name, km]) => name !== "Sec" && km > 0).sort((a, b) => b[1] - a[1]);
   let typeValue = "Sec";
@@ -759,7 +933,7 @@ function renderKpis(corridor, time) {
     typeNote = others || "aucun autre type diagnostiqué";
   }
   document.getElementById("kpi-cards").innerHTML = [
-    row("Indice maximal à cette heure", `${worstScore.toFixed(0)} · ${nowCat}`, `km ${corridor.distance[worst].toFixed(0)} · ${hazardLabel(at2(corridor.dominant, time, worst, n))}`, CATEGORY_COLORS[nowCat]),
+    row(`Indice maximal ${scope}`, `${worstScore.toFixed(0)} · ${nowCat}`, `km ${corridor.distance[worst].toFixed(0)} · ${hazardLabel(at2(corridor.dominant, time, worst, n))}`, CATEGORY_COLORS[nowCat]),
     row("Pic sur 48 h", `${peaks[peakPoint].toFixed(0)} · ${peakCat}`, `${state.network.timesShort[when[peakPoint]]} · km ${corridor.distance[peakPoint].toFixed(0)}`, CATEGORY_COLORS[peakCat]),
     row("Température ≈ 100 m au-dessus du sol", rangeText(temps, "°C", 1), `vent ${rangeText(winds, "km/h", 0)} · HR ${rangeText(humid, "%", 0)}`),
     row("Type de précipitation diagnostiqué", typeValue, typeNote),
@@ -772,17 +946,27 @@ function renderSegments(corridor) {
     host.innerHTML = `<p class="empty">Aucun tronçon n'atteint le niveau « Modéré » sur la période.</p>`;
     return;
   }
-  const rows = corridor.segments.map((item) => `
-    <tr>
-      <td>km ${item.km0.toFixed(0)} → ${item.km1.toFixed(0)}</td>
-      <td>${item.len.toFixed(0)} km</td>
+  const end = corridor.distance[corridor.n - 1];
+  const full = state.lo <= 0.05 && state.hi >= end - 0.05;
+  const rows = corridor.segments.map((item) => {
+    const active = !full && item.km1 >= state.lo && item.km0 <= state.hi;
+    return `<tr class="${active ? "active" : ""}" data-km0="${item.km0}" data-km1="${item.km1}" title="Isoler ce tronçon dans la coupe">
+      <td>km ${item.km0.toFixed(0)} → ${item.km1.toFixed(0)}<small>${item.len.toFixed(0)} km</small></td>
       <td><span class="badge" style="background:${CATEGORY_COLORS[item.cat]}">${item.score.toFixed(0)} · ${item.cat}</span></td>
       <td>${item.hazard}</td>
       <td>${item.precip}</td>
       <td>${item.temp.toFixed(1)} °C · ${item.wind.toFixed(0)} km/h</td>
       <td>${item.when}</td>
-    </tr>`).join("");
-  host.innerHTML = `<table class="segments"><thead><tr><th>Tronçon</th><th>Longueur</th><th>Indice</th><th>Aléa dominant</th><th>Précip.</th><th>Près du sol</th><th>Pic</th></tr></thead><tbody>${rows}</tbody></table>`;
+    </tr>`;
+  }).join("");
+  host.innerHTML = `<table class="segments"><thead><tr><th>Tronçon</th><th>Indice</th><th>Aléa dominant</th><th>Précip.</th><th>Près du sol</th><th>Pic</th></tr></thead><tbody>${rows}</tbody></table>`;
+  host.querySelectorAll("tbody tr").forEach((row) => {
+    row.addEventListener("click", () => {
+      const margin = Math.max(2.5, 0.15 * (Number(row.dataset.km1) - Number(row.dataset.km0)));
+      setSegment(Number(row.dataset.km0) - margin, Number(row.dataset.km1) + margin);
+      render();
+    });
+  });
 }
 
 function renderLegend() {
@@ -797,7 +981,7 @@ function filteredCorridors() {
   const region = document.getElementById("region-filter").value;
   return state.network.corridors.filter((item) => {
     if (voltages.length && !voltages.includes(item.voltage)) return false;
-    if (region && item.region !== region) return false;
+    if (region && !String(item.region).includes(region)) return false;
     return true;
   });
 }
@@ -844,8 +1028,44 @@ function hydrate(raw) {
     warm: unpack(raw.warm, "f16"),
     dominant: unpack(raw.dominant, "i8"),
     precip: unpack(raw.precip, "u8"),
+    vo: raw.vo ? unpack(raw.vo, "f16") : null,
   };
+  corridor.bearing = bearingRadians(corridor.lon, corridor.lat);
   return corridor;
+}
+
+function setSegment(lo, hi) {
+  const end = state.corridor.distance[state.corridor.n - 1];
+  let a = Math.max(0, Math.min(Number(lo), Number(hi)));
+  let b = Math.min(end, Math.max(Number(lo), Number(hi)));
+  const width = Math.min(MIN_SEGMENT_KM, end);
+  if (b - a < width) {
+    const center = Math.min(Math.max((a + b) / 2, width / 2), end - width / 2);
+    a = center - width / 2;
+    b = center + width / 2;
+  }
+  state.lo = Math.round(a * 10) / 10;
+  state.hi = Math.round(Math.min(end, b) * 10) / 10;
+}
+
+function syncSegmentControls(corridor) {
+  const end = corridor.distance[corridor.n - 1];
+  ["km-min", "km-max", "km-min-num", "km-max-num"].forEach((id) => {
+    const node = document.getElementById(id);
+    node.min = "0";
+    node.max = String(Math.ceil(end * 10) / 10);
+  });
+  document.getElementById("km-min").value = String(state.lo);
+  document.getElementById("km-max").value = String(state.hi);
+  document.getElementById("km-min-num").value = String(state.lo);
+  document.getElementById("km-max-num").value = String(state.hi);
+  const full = state.lo <= 0.05 && state.hi >= end - 0.05;
+  document.getElementById("segment-label").textContent = full ? "" : `${(state.hi - state.lo).toFixed(0)} km`;
+  document.getElementById("segment-reset").style.visibility = full ? "hidden" : "visible";
+  const meta = VARIABLES[state.variable];
+  document.getElementById("background-summary").innerHTML = `<span class="menu-key">Fond</span> ${meta ? meta.label : ""}`;
+  const count = state.overlays.size + [...state.isolines].filter((key) => key !== state.variable).length;
+  document.getElementById("overlay-summary").innerHTML = `<span class="menu-key">Calques</span> ${count}`;
 }
 
 async function loadCorridor(id) {
@@ -854,6 +1074,9 @@ async function loadCorridor(id) {
   if (!response.ok) throw new Error(`Corridor ${id} introuvable`);
   state.corridor = hydrate(await response.json());
   state.corridorId = id;
+  state.selection = null;
+  state.lo = 0;
+  state.hi = state.corridor.distance[state.corridor.n - 1];
   return state.corridor;
 }
 
@@ -865,6 +1088,7 @@ function render() {
   document.getElementById("time-selector").value = String(time);
   const resolved = resolvePoint(corridor, time);
   document.getElementById("profile-hint").textContent = resolved.hint;
+  syncSegmentControls(corridor);
   renderHeader(corridor, time);
   renderKpis(corridor, time);
   renderSegments(corridor);
@@ -885,6 +1109,37 @@ function attachPlotClicks() {
   listen("cross-section", (event) => {
     const point = event.points && event.points[0];
     if (!point || point.x == null) return;
+    state.selection = { corridor: state.corridor.id, km: Number(point.x) };
+    render();
+  });
+  const section = document.getElementById("cross-section");
+  if (!section.dataset.relayout) {
+    section.dataset.relayout = "1";
+    section.on("plotly_relayout", (event) => {
+      if (!state.corridor || !event) return;
+      let range = null;
+      Object.entries(event).forEach(([key, value]) => {
+        if (/^xaxis\d*\.autorange$/.test(key) && value) range = "full";
+      });
+      if (range !== "full") {
+        Object.entries(event).forEach(([key, value]) => {
+          const match = key.match(/^(xaxis\d*)\.range\[0\]$/);
+          if (match && event[`${match[1]}.range[1]`] != null) range = [Number(value), Number(event[`${match[1]}.range[1]`])];
+          if (/^xaxis\d*\.range$/.test(key) && Array.isArray(value)) range = [Number(value[0]), Number(value[1])];
+        });
+      }
+      if (!range) return;
+      const end = state.corridor.distance[state.corridor.n - 1];
+      const next = range === "full" ? [0, end] : range;
+      if (Math.abs(next[0] - state.lo) < 0.2 && Math.abs(next[1] - state.hi) < 0.2) return;
+      setSegment(next[0], next[1]);
+      render();
+    });
+  }
+  listen("hovmoller", (event) => {
+    const point = event.points && event.points[0];
+    if (!point) return;
+    state.time = Math.max(0, Math.min(state.network.nTime - 1, Math.round(Number(point.y))));
     state.selection = { corridor: state.corridor.id, km: Number(point.x) };
     render();
   });
@@ -935,17 +1190,48 @@ function bind() {
   voltage.innerHTML = network.voltages.map((value) => `<option value="${value}">${value} kV</option>`).join("");
   const region = document.getElementById("region-filter");
   region.insertAdjacentHTML("beforeend", network.regions.map((value) => `<option value="${value}">${value}</option>`).join(""));
-  document.getElementById("corridor-hint").textContent = `${network.corridors.length} corridors aériens de 5 km et plus dans le domaine ERA5. « pic » = indice maximal sur 48 h. Cliquez aussi un corridor sur la carte.`;
-  radios(document.getElementById("variable-selector"), "variable", Object.entries(VARIABLES).map(([key, meta]) => [meta.label, key]), state.variable, (value) => {
+  document.getElementById("corridor-hint").textContent = `${network.corridors.length} corridors aériens de 5 km et plus. « pic » = indice maximal sur 48 h.`;
+  const shown = Object.entries(VARIABLES);
+  radios(document.getElementById("background-selector"), "variable", shown.map(([key, meta]) => [meta.label, key]), state.variable, (value) => {
     state.variable = value;
     render();
   });
+  const checks = (host, options, selected) => {
+    host.innerHTML = options.map(([label, value]) => `<label><input type="checkbox" value="${value}" ${selected.has(value) ? "checked" : ""}> ${label}</label>`).join("");
+    host.querySelectorAll("input").forEach((input) => {
+      input.addEventListener("change", () => {
+        if (input.checked) selected.add(input.value);
+        else selected.delete(input.value);
+        render();
+      });
+    });
+  };
+  checks(document.getElementById("overlay-selector"), OVERLAYS, state.overlays);
+  checks(document.getElementById("isoline-selector"), shown.map(([key, meta]) => [`${meta.label} (${meta.unit})`, key]), state.isolines);
   radios(document.getElementById("cap-selector"), "cap", [["3 km", 3], ["6 km", 6], ["10 km", 10]], state.cap, (value) => {
     state.cap = Number(value);
     render();
   });
-  radios(document.getElementById("basemap-selector"), "basemap", [["Carte (en ligne)", "online"], ["Schéma (hors ligne)", "offline"]], state.basemap, (value) => {
+  radios(document.getElementById("basemap-selector"), "basemap", [["Carte", "online"], ["Schéma hors ligne", "offline"]], state.basemap, (value) => {
     state.basemap = value;
+    render();
+  });
+  const applySegment = () => {
+    setSegment(document.getElementById("km-min").value, document.getElementById("km-max").value);
+    render();
+  };
+  document.getElementById("km-min").addEventListener("change", applySegment);
+  document.getElementById("km-max").addEventListener("change", applySegment);
+  document.getElementById("km-min-num").addEventListener("change", (event) => {
+    setSegment(event.target.value, state.hi);
+    render();
+  });
+  document.getElementById("km-max-num").addEventListener("change", (event) => {
+    setSegment(state.lo, event.target.value);
+    render();
+  });
+  document.getElementById("segment-reset").addEventListener("click", () => {
+    setSegment(0, state.corridor.distance[state.corridor.n - 1]);
     render();
   });
   const slider = document.getElementById("time-selector");

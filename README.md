@@ -43,6 +43,8 @@ libellé, unité, fonction de calcul sur la grille, palette, bornes et pas des
 isolignes. Elle apparaît automatiquement comme fond, comme isolignes et dans
 les infobulles. Si elle dépend d'un champ ERA5 optionnel (`requires={"vo"}`),
 elle n'est proposée que lorsque ce champ est présent dans le fichier.
+Le site statique reprend la même liste dans `docs/app.js` (`VARIABLES` et
+`field` calculés dans `grids`) : une variable ajoutée ici doit y être recopiée.
 
 ## Site statique (GitHub Pages)
 

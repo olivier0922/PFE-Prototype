@@ -13,43 +13,25 @@
       <div class="brand">
         <p class="eyebrow">Hydro-Québec · TransÉnergie</p>
         <h1>Météo sur le réseau</h1>
-        <p class="lede">Coupe atmosphérique et indice d'aléa le long des corridors de transport.</p>
       </div>
       <section class="sidebar-section">
         <h2>Corridor</h2>
-        <div class="field">
-          <label for="voltage-filter">Tension</label>
-          <select id="voltage-filter" multiple></select>
-        </div>
-        <div class="field">
-          <label for="region-filter">Région (direction territoriale)</label>
-          <select id="region-filter">
-            <option value="">Toutes les régions</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="corridor-selector">Corridor</label>
-          <select id="corridor-selector"></select>
+        <select id="corridor-selector"></select>
+        <details class="filters">
+          <summary>Filtres</summary>
+          <div class="field">
+            <label for="voltage-filter">Tension</label>
+            <select id="voltage-filter" multiple></select>
+          </div>
+          <div class="field">
+            <label for="region-filter">Région</label>
+            <select id="region-filter">
+              <option value="">Toutes les régions</option>
+            </select>
+          </div>
           <small id="corridor-hint" class="hint"></small>
-        </div>
-        <button id="most-exposed" class="button ghost" type="button">Aller au corridor le plus exposé à cette heure</button>
-      </section>
-      <section class="sidebar-section">
-        <h2>Affichage</h2>
-        <div class="field">
-          <label>Variable de la coupe</label>
-          <div id="variable-selector" class="radio"></div>
-        </div>
-        <div class="field">
-          <label>Plafond de la coupe</label>
-          <div id="cap-selector" class="radio inline"></div>
-          <small class="hint">L'isotherme 0 °C reste affichée quelle que soit la variable.</small>
-        </div>
-        <div class="field">
-          <label>Fond de carte</label>
-          <div id="basemap-selector" class="radio inline"></div>
-          <small class="hint">Le schéma n'utilise aucun serveur externe.</small>
-        </div>
+        </details>
+        <button id="most-exposed" class="button ghost" type="button">Corridor le plus exposé à cette heure</button>
       </section>
       <section class="sidebar-section">
         <h2>Échéance</h2>
@@ -57,76 +39,127 @@
         <input id="time-selector" type="range" min="0" value="0" step="1">
         <div id="time-marks" class="time-marks"></div>
         <div class="button-row">
-          <button id="time-prev" class="button" type="button">◀ 1 h</button>
+          <button id="time-prev" class="button" type="button" title="Heure précédente">◀</button>
           <button id="time-play" class="button primary" type="button">▶ Lecture</button>
-          <button id="time-next" class="button" type="button">1 h ▶</button>
+          <button id="time-next" class="button" type="button" title="Heure suivante">▶</button>
         </div>
-        <small class="hint">Analyses ERA5 horaires du 29 au 30 décembre 1942 (heure locale HNE).</small>
+        <small class="hint">ERA5 horaire, 29–30 décembre 1942 (heure locale HNE).</small>
       </section>
       <details class="help">
-        <summary>Comment lire cette vue</summary>
+        <summary>Comment lire le tableau de bord</summary>
         <ul>
           <li>La coupe suit le corridor de A vers B; l'axe horizontal est le kilométrage réel.</li>
-          <li>Le relief brun est l'altitude ETOPO. La ligne pointillée noire est l'isotherme 0 °C.</li>
-          <li>Les tirets gris sont les niveaux ERA5 (1000, 850, 700 hPa…). Entre eux, les valeurs sont interpolées linéairement.</li>
-          <li>La bande « Précip. » diagnostique le type probable à partir de la structure thermique.</li>
-          <li>L'indice 0–100 suit l'aléa dominant: pluie verglaçante, givrage, vent, froid.</li>
-          <li>Cliquez sur la coupe pour afficher le sondage vertical d'un point.</li>
+          <li>Fond: isolignes remplies de la variable choisie (isothermes pour la température).</li>
+          <li>Calques: isotherme 0 °C, couche de fonte, vecteurs de vent, isolignes d'autres variables.</li>
+          <li>Flèches de vent: vent horizontal vu du dessus, nord en haut; la taille suit la vitesse.</li>
+          <li>Glisser sur la coupe pour zoomer, molette pour zoomer, double-clic pour tout revoir.</li>
+          <li>Un tronçon choisi (curseur, zoom ou tableau) filtre les indicateurs et recentre la carte.</li>
+          <li>Cliquez la coupe ou le diagramme 48 h pour afficher le sondage d'un point.</li>
+          <li>⤢ agrandit un panneau en plein écran; Échap pour revenir.</li>
         </ul>
       </details>
     </aside>
     <main class="main">
       <div id="corridor-header" class="corridor-header"></div>
       <section id="kpi-cards" class="kpi-grid"></section>
-      <section class="panel">
+      <section class="panel" id="panel-section">
         <div class="panel-head">
-          <h3>Coupe atmosphérique le long du corridor</h3>
-          <span class="panel-hint">Cliquez sur la coupe pour inspecter un point</span>
+          <div class="panel-title"><h3>Coupe le long du corridor</h3></div>
+          <div class="toolbar">
+            <details class="menu">
+              <summary id="background-summary"></summary>
+              <div class="menu-body"><div id="background-selector" class="menu-options"></div></div>
+            </details>
+            <details class="menu">
+              <summary id="overlay-summary"></summary>
+              <div class="menu-body">
+                <p class="menu-heading">Repères</p>
+                <div id="overlay-selector" class="menu-options"></div>
+                <p class="menu-heading">Isolignes par-dessus le fond</p>
+                <div id="isoline-selector" class="menu-options"></div>
+              </div>
+            </details>
+            <div id="cap-selector" class="pills"></div>
+            <button class="icon-button" type="button" data-fullscreen="1" title="Plein écran (Échap pour quitter)">⤢</button>
+          </div>
         </div>
-        <div id="cross-section"></div>
+        <div id="cross-section" class="graph graph-section"></div>
+        <div class="segment-bar">
+          <span class="segment-title">Tronçon</span>
+          <input id="km-min-num" class="km-num" type="number" min="0" step="0.5">
+          <div class="dual-range">
+            <input id="km-min" type="range" min="0" step="0.5">
+            <input id="km-max" type="range" min="0" step="0.5">
+          </div>
+          <input id="km-max-num" class="km-num" type="number" min="0" step="0.5">
+          <span id="segment-label" class="segment-label"></span>
+          <button id="segment-reset" class="chip-button" type="button">Corridor entier</button>
+        </div>
         <div id="legend" class="legend-row"></div>
       </section>
       <div class="two-columns">
         <section class="panel">
           <div class="panel-head">
-            <h3>Réseau et tracé</h3>
-            <span class="panel-hint">Couleur = indice à l'heure affichée</span>
+            <div class="panel-title">
+              <h3>Réseau</h3>
+              <span class="panel-hint">Couleur = indice à l'heure affichée</span>
+            </div>
+            <div class="toolbar">
+              <div id="basemap-selector" class="pills"></div>
+              <button class="icon-button" type="button" data-fullscreen="1" title="Plein écran (Échap pour quitter)">⤢</button>
+            </div>
           </div>
-          <div id="network-map"></div>
+          <div id="network-map" class="graph graph-map"></div>
         </section>
         <section class="panel">
           <div class="panel-head">
-            <h3>Évolution sur 48 h</h3>
-            <span class="panel-hint">Où et quand l'indice culmine</span>
+            <div class="panel-title">
+              <h3>Évolution sur 48 h</h3>
+              <span class="panel-hint">Cliquez pour aller à cette heure et ce point</span>
+            </div>
+            <div class="toolbar">
+              <button class="icon-button" type="button" data-fullscreen="1" title="Plein écran (Échap pour quitter)">⤢</button>
+            </div>
           </div>
-          <div id="hovmoller"></div>
+          <div id="hovmoller" class="graph graph-medium"></div>
         </section>
       </div>
       <div class="two-columns">
         <section class="panel">
           <div class="panel-head">
-            <h3>Sondage vertical</h3>
-            <span id="profile-hint" class="panel-hint"></span>
+            <div class="panel-title">
+              <h3>Sondage vertical</h3>
+              <span id="profile-hint" class="panel-hint"></span>
+            </div>
+            <div class="toolbar">
+              <button class="icon-button" type="button" data-fullscreen="1" title="Plein écran (Échap pour quitter)">⤢</button>
+            </div>
           </div>
-          <div id="vertical-profile"></div>
+          <div id="vertical-profile" class="graph graph-medium"></div>
         </section>
         <section class="panel">
           <div class="panel-head">
-            <h3>Segments les plus exposés sur 48 h</h3>
-            <span class="panel-hint">Tronçons contigus dont l'indice atteint « Élevé »</span>
+            <div class="panel-title">
+              <h3>Tronçons exposés sur 48 h</h3>
+              <span class="panel-hint">Cliquez une ligne pour isoler le tronçon</span>
+            </div>
+            <div class="toolbar">
+              <button class="icon-button" type="button" data-fullscreen="1" title="Plein écran (Échap pour quitter)">⤢</button>
+            </div>
           </div>
           <div id="segments-table" class="table-wrap"></div>
         </section>
       </div>
       <aside class="notice">
         <strong>Portée de l'indice. </strong>
-        Il mesure un potentiel atmosphérique calculé à partir de la température, de l'humidité, du vent et
-        du géopotentiel sur cinq niveaux de pression. Les données fournies ne contiennent ni précipitations ni
-        eau liquide: il ne s'agit pas d'une prévision validée d'accumulation de glace. Les seuils sont
-        documentés dans src/risk.py et doivent être calibrés avec les observations et l'historique des interruptions.
+        Potentiel atmosphérique calculé à partir de la température, de l'humidité, du vent et du
+        géopotentiel sur cinq niveaux de pression. Sans précipitations ni eau liquide dans les données,
+        ce n'est pas une prévision validée d'accumulation de glace; les seuils (src/risk.py) doivent être
+        calibrés avec les observations et l'historique des interruptions.
       </aside>
     </main>
   </div>
+  <script src="dashboard.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

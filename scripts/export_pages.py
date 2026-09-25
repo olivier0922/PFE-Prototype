@@ -72,7 +72,8 @@ def _corridor_payload(corridor_id: str) -> dict[str, object]:
     corridor = repository.get_corridor(corridor_id)
     distance, longitude, latitude = sample_line_geometry(corridor.geometry)
     terrain = repository.sample_terrain(longitude, latitude)
-    levels = spatial_columns(repository, longitude, latitude)
+    extra = ("vo",) if "vo" in repository.weather.data_vars else ()
+    levels = spatial_columns(repository, longitude, latitude, extra)
     diagnostics = column_diagnostics(
         levels["height"], levels["temperature"], levels["humidity"], levels["u"], levels["v"], terrain
     )
@@ -97,6 +98,7 @@ def _corridor_payload(corridor_id: str) -> dict[str, object]:
         "humidity": _b64(levels["humidity"], np.float16),
         "u": _b64(levels["u"], np.float16),
         "v": _b64(levels["v"], np.float16),
+        **({"vo": _b64(levels["vo"], np.float16)} if "vo" in levels else {}),
         "score": _b64(risk.score, np.float16),
         "nearT": _b64(diagnostics.near_ground_temperature_c, np.float16),
         "nearRh": _b64(diagnostics.near_ground_humidity, np.float16),
