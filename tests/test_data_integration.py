@@ -18,12 +18,12 @@ def test_supplied_sources_are_valid() -> None:
     summary = validate_sources()
     assert summary["era5_dimensions"]["time"] == 48
     assert summary["levels_hpa"] == [1000, 850, 700, 500, 250]
-    assert summary["segment_count"] == 80
+    assert summary["segment_count"] == 3867
 
 
 def test_corridors_are_continuous_and_inside_domain(repository: DataRepository) -> None:
     corridors = repository.corridors
-    assert len(corridors) >= 40
+    assert len(corridors) > 500
     assert (corridors["length_km"] >= 5).all()
     assert corridors.geometry.geom_type.eq("LineString").all()
     assert corridors["corridor_id"].is_unique

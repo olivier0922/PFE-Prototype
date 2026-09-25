@@ -5,7 +5,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 
 ERA5_ARCHIVE = ROOT_DIR / "era5-pressure-levels-19421229-30.zarr.zip"
 ERA5_DIR = ROOT_DIR / "era5-pressure-levels-19421229-30.zarr"
-LINES_PATH = ROOT_DIR / "lignes_demo.geojson"
+LINES_PATH = ROOT_DIR / "lignes_transport.geojson"
 TERRAIN_PATH = ROOT_DIR / "mnt_ETOPO.tiff"
 
 GRAVITY_M_S2 = 9.80665
